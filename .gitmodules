@@ -1,0 +1,6 @@
+[submodule "projects/hw/dsi/kicad-lib"]
+	path = projects/hw/dsi/kicad-lib
+	url = https://github.com/xiongyumail/kicad-lib
+[submodule "tools/kicad-docker"]
+	path = tools/kicad-docker
+	url = https://github.com/xiongyumail/kicad-docker

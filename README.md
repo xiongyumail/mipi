@@ -1,1 +1,7 @@
 # mipi
+
+## Running
+
+```
+./kicad.sh
+```
