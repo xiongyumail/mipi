@@ -1,3 +1,4 @@
+#!/bin/bash
 IMAGE_VERSION="kicad:5.1.8"
 
 if [[ "$(sudo docker images -q ${IMAGE_VERSION} 2> /dev/null)" == "" ]]; then
