@@ -44,29 +44,31 @@ static void ssd2805_delay_ms(uint32_t time)
     vTaskDelay(time / portTICK_RATE_MS);
 }
 
-static void ssd2805_write_cmd(uint8_t cmd)
+static void ssd2805_write_cmd(uint8_t cmd, uint32_t len, ...)
 {
-    ssd2805_set_level(ssd2805_obj->config.pin.dc, 0, ssd2805_obj->config.invert.dc);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 0, ssd2805_obj->config.invert.cs);
-    ssd2805_obj->write_cb(&cmd, 1);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 1, ssd2805_obj->config.invert.cs);
-}
+    if (len > 32) {
+        return;
+    }
+    va_list arg_ptr; 
+    uint8_t command_param[32] = { 0 };
+    va_start(arg_ptr, len);
+    for (int x = 0; x < len; x++) {
+        command_param[x] = va_arg(arg_ptr, int);
+        // printf("[%d]: 0x%x\n", x, command_param[x]);
+    }
+    va_end(arg_ptr); 
 
-static void ssd2805_write_byte(uint8_t data)
-{
+    ssd2805_set_level(ssd2805_obj->config.pin.dc, 0, ssd2805_obj->config.invert.dc);
+    ssd2805_obj->write_cb(&cmd, 1);
     ssd2805_set_level(ssd2805_obj->config.pin.dc, 1, ssd2805_obj->config.invert.dc);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 0, ssd2805_obj->config.invert.cs);
-    ssd2805_obj->write_cb(&data, 1);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 1, ssd2805_obj->config.invert.cs);
+    if (len > 0) {
+        ssd2805_obj->write_cb(command_param, len);
+    }
 }
 
 static void ssd2805_write_reg(uint8_t cmd, uint16_t data)
 {
-    ssd2805_write_cmd(cmd);
-    ssd2805_set_level(ssd2805_obj->config.pin.dc, 1, ssd2805_obj->config.invert.dc);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 0, ssd2805_obj->config.invert.cs);
-    ssd2805_obj->write_cb(&data, 2);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 1, ssd2805_obj->config.invert.cs);
+    ssd2805_write_cmd(cmd, 2, data & 0xFF, (data >> 8) & 0xFF);
 }
 
 static void ssd2805_rst()
@@ -81,156 +83,128 @@ static void ssd2805_rst()
 
 static void ssd2805_config(ssd2805_config_t *config)
 {
-    ssd2805_write_reg(0xB9, 0x0000); //PLL Control, Disable
-    ssd2805_delay_ms(20);
-    ssd2805_write_reg(0xBA, 0x0012); //PLL Configuration, P & N M, P = 0x1, N = 0x1, M = 0x12
-    ssd2805_write_reg(0xB9, 0x0001); //PLL Control, Enable
-    ssd2805_delay_ms(20);
-    ssd2805_write_reg(0xD6, 0x0105); //Test, R2 PNB & END & COLOR
-    ssd2805_write_reg(0xB8, 0x0000); //Virtual Channel Control
-    ssd2805_write_reg(0xBB, 0x0003); //Clock Control, SYS_CLK & LP Clock
-    ssd2805_delay_ms(25);
+    //Step 1: Set PLL
 
-		// //Step 1: Set PLL
-		// ssd2805_write_reg(0xba, 0x000f);	//PLL 	= clock*MUL/(PDIV*DIV) 
-		// 				//		= clock*(BAh[7:0]+1)/((BAh[15:12]+1)*(BAh[11:8]+1))
-		// 				//		= 20*(0x0f+1)/1*1 = 20*16 = 320MHz
-		// 				//Remark: 350MHz >= fvco >= 225MHz for SSD2805 since the max. speed per lane is 350Mbps
-		// ssd2805_write_reg(0xb9, 0x0001);	//enable PLL
+    ssd2805_write_reg(0xba, 0x0004);    //PLL     = clock*MUL/(PDIV*DIV) 
+                    //        = clock*(BAh[7:0]+1)/((BAh[15:12]+1)*(BAh[11:8]+1))
+                    //        = 20*(0x0f+1)/1*1 = 20*16 = 320MHz
+                    //Remark: 350MHz >= fvco >= 225MHz for SSD2805 since the max. speed per lane is 350Mbps
+    ssd2805_write_reg(0xb9, 0x0001);    //enable PLL
 
-		// //	while((SSD2805ReadReg(0xc6)&0x0080)!=0x0080)	//infinite loop to wait for PLL to lock
-		// //		;
+    ssd2805_delay_ms(200);        //simply wait for 2 ms for PLL lock, more stable as SSD2805ReadReg(arg) doesn't work at full compiler optimzation
+    
+    //Step 3: set clock control register for SYS_CLK & LP clock speed
+    //SYS_CLK = TX_CLK/(BBh[7:6]+1), TX_CLK = external oscillator clock speed
+    //In this case, SYS_CLK = 20MHz/(1+1)=10MHz. Measure SYS_CLK pin to verify it.
+    //LP clock = PLL/(8*(BBh[5:0]+1)) = 320/(8*(4+1)) = 8MHz, conform to AUO panel's spec, default LP = 8Mbps
+    //S6D04D2 is the controller of AUO 1.54" panel.
+    ssd2805_write_reg(0xBB, 0x0044);
+    ssd2805_write_reg(0xD6, 0x0100);    //output sys_clk for debug. Now check sys_clk pin for 10MHz signal
 
-		// ssd2805_delay_ms(2);		//simply wait for 2 ms for PLL lock, more stable as SSD2805ReadReg(arg) doesn't work at full compiler optimzation
-		
-		// //Step 3: set clock control register for SYS_CLK & LP clock speed
-		// //SYS_CLK = TX_CLK/(BBh[7:6]+1), TX_CLK = external oscillator clock speed
-		// //In this case, SYS_CLK = 20MHz/(1+1)=10MHz. Measure SYS_CLK pin to verify it.
-		// //LP clock = PLL/(8*(BBh[5:0]+1)) = 320/(8*(4+1)) = 8MHz, conform to AUO panel's spec, default LP = 8Mbps
-		// //S6D04D2 is the controller of AUO 1.54" panel.
-		// ssd2805_write_reg(0xBB, 0x0044);
-		// ssd2805_write_reg(0xD6, 0x0100);	//output sys_clk for debug. Now check sys_clk pin for 10MHz signal
+    //Step 4: Set MIPI packet format
+    ssd2805_write_reg(0xB7, 0x0201);    //0x0243 EOT packet enable, write operation, it is a DCS packet
+                                    //HS clock is disabled, video mode disabled, in HS mode to send data
 
-		// //Step 4: Set MIPI packet format
-		// ssd2805_write_reg(0xB7, 0x0243);	//EOT packet enable, write operation, it is a DCS packet
-		// 								//HS clock is disabled, video mode disabled, in HS mode to send data
+    //Step 5: set Virtual Channel (VC) to use
+    ssd2805_write_reg(0xB8, 0x0000);
 
-		// //Step 5: set Virtual Channel (VC) to use
-		// ssd2805_write_reg(0xB8, 0x0000);
+    //Step 6: Now write command to panel
+    ssd2805_write_reg(0xBE, 0x0050);
 
-		// //Step 6: Now write DCS command to AUO panel for system power-on upon reset
-		// ssd2805_write_reg(0xbc, 0x0000);			//define TDC size
-		// ssd2805_write_reg(0xbd, 0x0000);
-		// ssd2805_write_cmd(0x11);				//DCS sleep-out command
+    // ssd2805_write_reg(0xC9, 0x0B02);
+    // ssd2805_write_reg(0xCA, 0x2003);
+    // ssd2805_write_reg(0xCB, 0x021a);
+    // ssd2805_write_reg(0xCC, 0x0d12);
+    // ssd2805_write_reg(0xCD, 0x1000);
+    // ssd2805_write_reg(0xCE, 0x0405);
+    // ssd2805_write_reg(0xCF, 0x0000);
+    // ssd2805_write_reg(0xD0, 0x0010);
+    // ssd2805_write_reg(0xD1, 0x0000);
+    // ssd2805_write_reg(0xD2, 0x0010);
 }
 
-static void ssd2805_gen_packet(uint32_t len)
+void ssd2805_gen_write_cmd(uint8_t cmd, uint32_t len, ...)
 {
-    ssd2805_write_reg(0xBC, len & 0xFFFF);
-    ssd2805_write_reg(0xBD, len >> 16);
-    ssd2805_write_cmd(0xBF);
-}
-
-void ssd2805_gen_write(uint8_t cmd, uint32_t len, ...)
-{
-	va_list arg_ptr; 
-	int data = 0; 
+    va_list arg_ptr; 
+    uint8_t *data = malloc(len + 1);
     va_start(arg_ptr, len);
+    ssd2805_write_reg(0xB7, 0x0201);
     ssd2805_write_reg(0xBC, (len+1) & 0xFFFF);
     ssd2805_write_reg(0xBD, (len+1) >> 16);
-	ssd2805_write_cmd(0xBF);
-    // ssd2805_write_cmd(0x2c);
-	ssd2805_write_byte(cmd);
+
+    data[0] = cmd;
     for (int x = 0; x < len; x++) {
-		data = va_arg(arg_ptr, int);
-        ssd2805_write_byte(data);
+        data[x + 1] = va_arg(arg_ptr, int);
     }
-	va_end(arg_ptr); 
+    va_end(arg_ptr); 
+    ssd2805_write_cmd(0xBF, 0);
+    ssd2805_obj->write_cb(data, len+1);
+    free(data);
 }
 
-static void ssd2805_dcs_packet(uint32_t len)
+void ssd2805_dcs_write_cmd(uint8_t cmd, uint32_t len, ...)
 {
-    ssd2805_write_reg(0xBC, len & 0xFFFF);
-    ssd2805_write_reg(0xBD, len >> 16);
-    ssd2805_write_reg(0xB7, 0x0340);
-    ssd2805_write_cmd(0x2c);
+    va_list arg_ptr; 
+    uint8_t *data = malloc(len);
+    va_start(arg_ptr, len);
+    ssd2805_write_reg(0xB7, 0x0241);
+    ssd2805_write_reg(0xBC, (len) & 0xFFFF);
+    ssd2805_write_reg(0xBD, ((len) >> 16) & 0xFFFF);
+
+    for (int x = 0; x < len; x++) {
+        data[x] = va_arg(arg_ptr, int);
+    }
+    va_end(arg_ptr); 
+    ssd2805_write_cmd(cmd, 0);
+    if (len > 0) {
+        ssd2805_obj->write_cb(data, len);
+    }
+    free(data);
+}
+
+void ssd2805_dcs_write_data(uint8_t *data, uint32_t len)
+{
+    ssd2805_write_reg(0xB7, 0x0241);
+    ssd2805_write_reg(0xBC, (len) & 0xFFFF);
+    ssd2805_write_reg(0xBD, (len) >> 16);
+    
+    ssd2805_write_cmd(0x3c, 0);
+    ssd2805_obj->write_cb(data, len);
 }
 
 static void ssd2805_lcm_config(ssd2805_config_t *config)
-{
-    ssd2805_write_reg(0xB7,0x0210); //Generic Packet
-    ssd2805_delay_ms(200);
-    
-    ssd2805_gen_write(0xFF,4,0xAA,0x55,0x25,0x01);	
-    ssd2805_gen_write(0xF0,5,0x55,0xAA,0x52,0x08,0x00);
-    ssd2805_gen_write(0xB1,1,0xFC);
-    ssd2805_gen_write(0xB8,4,0x01,0x02,0x02,0x02);
-    ssd2805_gen_write(0xBC,3,0x05,0x05,0x05);
-    ssd2805_gen_write(0xB7,2,0x00,0x00);
-    ssd2805_gen_write(0xC8,18,0x01,0x00,0x46,0x1E,0x46,0x1E,0x46,0x1E,0x46,0x1E,0x64,0x3C,0x3C,0x64,0x64,0x3C,0x3C,0x64);
-    ssd2805_gen_write(0xF0,5,0xAA,0x55,0x52,0x08,0x01);
-    ssd2805_gen_write(0xB0,3,0x05,0x05,0x05);
-    ssd2805_gen_write(0xB6,3,0x44,0x44,0x44);
-    ssd2805_gen_write(0xB1,3,0x05,0x05,0x05);
-    ssd2805_gen_write(0xB7,3,0x34,0x34,0x34);
-    ssd2805_gen_write(0xB3,3,0x16,0x16,0x16);
-    ssd2805_gen_write(0xB4,3,0x0A,0x0A,0x0A);
-    ssd2805_gen_write(0xBC,3,0x00,0x90,0x11);
-    ssd2805_gen_write(0xBD,3,0x00,0x90,0x11);
-    ssd2805_gen_write(0xBE,1,0x51);	
-    ssd2805_gen_write(0xD1,16,0x00,0x17,0x00,0x24,0x00,0x3D,0x00,0x52,0x00,0x66,0x00,0x86,0x00,0xA0,0x00,0xCC);
-    ssd2805_gen_write(0xD2,16,0x00,0xF1,0x01,0x26,0x01,0x4E,0x01,0x8C,0x01,0xBC,0x01,0xBE,0x01,0xE7,0x02,0x0E);
-    ssd2805_gen_write(0xD3,16,0x02,0x22,0x02,0x3C,0x02,0x4F,0x02,0x71,0x02,0x90,0x02,0xC6,0x02,0xF1,0x03,0x3A);
-    ssd2805_gen_write(0xD4,4,0x03,0xB15,0x03,0xC1);
-    ssd2805_gen_write(0xD5,16,0x00,0x17,0x00,0x24,0x00,0x3D,0x00,0x52,0x00,0x66,0x00,0x86,0x00,0xA0,0x00,0xCC);
-    ssd2805_gen_write(0xD6,16,0x00,0xF1,0x01,0x26,0x01,0x4E,0x01,0x8C,0x01,0xBC,0x01,0xBE,0x01,0xE7,0x02,0x0E);
-    ssd2805_gen_write(0xD7,16,0x02,0x22,0x02,0x3C,0x02,0x4F,0x02,0x71,0x02,0x90,0x02,0xC6,0x02,0xF1,0x03,0x3A);
-    ssd2805_gen_write(0xD8,4,0x03,0xB5,0x03,0xC1);
-    ssd2805_gen_write(0xD9,16,0x00,0x17,0x00,0x24,0x00,0x3D,0x00,0x52,0x00,0x66,0x00,0x86,0x00,0xA0,0x00,0xCC);
-    ssd2805_gen_write(0xDD,16,0x00,0xF1,0x01,0x26,0x01,0x4E,0x01,0x8C,0x01,0xBC,0x01,0xBE,0x01,0xE7,0x02,0x0E);
-    ssd2805_gen_write(0xDE,16,0x02,0x22,0x02,0x3C,0x02,0x4F,0x02,0x71,0x02,0x90,0x02,0xC6,0x02,0xF1,0x03,0x3A);
-    ssd2805_gen_write(0xDF,4,0x03,0xB5,0x03,0xC1);
-    ssd2805_gen_write(0xE0,16,0x00,0x17,0x00,0x24,0x00,0x3D,0x00,0x52,0x00,0x66,0x00,0x86,0x00,0xA0,0x00,0xCC);
-    ssd2805_gen_write(0xE1,16,0x00,0xF1,0x01,0x26,0x01,0x4E,0x01,0x8C,0x01,0xBC,0x01,0xBE,0x01,0xE7,0x02,0x0E);
-    ssd2805_gen_write(0xE2,16,0x02,0x22,0x02,0x3C,0x02,0x4F,0x02,0x71,0x02,0x90,0x02,0xC6,0x02,0xF1,0x03,0x3A);
-    ssd2805_gen_write(0xE3,4,0x03,0xB5,0x03,0xC1);
-    ssd2805_gen_write(0xE4,16,0x00,0x17,0x00,0x24,0x00,0x3D,0x00,0x52,0x00,0x66,0x00,0x86,0x00,0xA0,0x00,0xCC);
-    ssd2805_gen_write(0xE5,16,0x00,0xF1,0x01,0x26,0x01,0x4E,0x01,0x8C,0x01,0xBC,0x01,0xBE,0x01,0xE7,0x02,0x0E);
-    ssd2805_gen_write(0xE6,16,0x02,0x22,0x02,0x3C,0x02,0x4F,0x02,0x71,0x02,0x90,0x02,0xC6,0x02,0xF1,0x03,0x3A);
-    ssd2805_gen_write(0xE7,4,0x03,0xB5,0x03,0xC1);
-    ssd2805_gen_write(0xE8,16,0x00,0x17,0x00,0x24,0x00,0x3D,0x00,0x52,0x00,0x66,0x00,0x86,0x00,0xA0,0x00,0xCC);
-    ssd2805_gen_write(0xE9,16,0x00,0xF1,0x01,0x26,0x01,0x4E,0x01,0x8C,0x01,0xBC,0x01,0xBE,0x01,0xE7,0x02,0x0E);
-    ssd2805_gen_write(0xEA,16,0x02,0x22,0x02,0x3C,0x02,0x4F,0x02,0x71,0x02,0x90,0x02,0xC6,0x02,0xF1,0x03,0x3A);
-    ssd2805_gen_write(0xEB,4,0x03,0xB5,0x03,0xC1);
-    ssd2805_delay_ms(200);
-    ssd2805_gen_write(0x35,0,0x00);
-    ssd2805_gen_write(0x11,0,0x00);
-    ssd2805_delay_ms(200);
-    ssd2805_gen_write(0x29,0,0x00);
+{   
+    // ssd2805_dcs_write_cmd(0x01, 0);
+    // ssd2805_delay_ms(100);
 
-    // ssd2805_write_reg(0xB7, 0x0243);
+    // ssd2805_dcs_write_cmd(0x11, 0);
+
+    // ssd2805_dcs_write_cmd(0x29, 0);
+    // // Refresh
+    // ssd2805_dcs_write_cmd(0x36, 1, 0x00);
+    // // Pixel Format
+    // ssd2805_dcs_write_cmd(0x3A, 1, 0x55);
+    // // Normal Display Mode On
+    // ssd2805_dcs_write_cmd(0x13, 0);
+
+    ssd2805_dcs_write_cmd(0x11, 0);         //Sleep Out
+    ssd2805_delay_ms(200);
+    ssd2805_dcs_write_cmd(0x36, 1, 0x00);
+    
+    ssd2805_dcs_write_cmd(0x3a, 1, 0x57);         //16bit pixel
+
+    ssd2805_dcs_write_cmd(0x13, 0); 
+    ssd2805_dcs_write_cmd(0x38, 0); //Normal mode
+    ssd2805_delay_ms(120);
+    ssd2805_dcs_write_cmd(0x29, 0); //Display ON
 }
 
 static void ssd2805_set_index(uint16_t x_start, uint16_t y_start, uint16_t x_end, uint16_t y_end)
 {
-    ssd2805_write_reg(0xB7,0x0210); //Generic Packet 
-    ssd2805_write_reg(0xBC, 5);
-    ssd2805_write_reg(0xBD, 0);
-	ssd2805_write_cmd(0xbf);  
-	ssd2805_write_byte(0x2a);   
-	ssd2805_write_byte(x_start >> 8);
-	ssd2805_write_byte(x_start & 0xff);
-	ssd2805_write_byte(x_end >> 8);
-	ssd2805_write_byte(x_end & 0xff);
-    ssd2805_write_reg(0xBC, 5);
-    ssd2805_write_reg(0xBD, 0); 
-    ssd2805_write_cmd(0xbf);  
-	ssd2805_write_byte(0x2b);   
-	ssd2805_write_byte(y_start >> 8);
-	ssd2805_write_byte(y_start & 0xff);
-	ssd2805_write_byte(y_end >> 8);
-	ssd2805_write_byte(y_end & 0xff);
-    // ssd2805_dcs_packet(540 * 960 * 2);
+    ssd2805_dcs_write_cmd(0x2a, 4, (x_start >> 8) & 0xFF, x_start & 0xff, (x_end >> 8) & 0xFF, x_end & 0xff);
+    // ssd2805_dcs_write_cmd(0x2a, 4, x_start & 0xff, (x_start >> 8) & 0xFF, x_end & 0xff, (x_end >> 8) & 0xFF);
+    ssd2805_dcs_write_cmd(0x2b, 4, (y_start >> 8) & 0xFF, y_start & 0xff, (y_end >> 8) & 0xFF, y_end & 0xff);
+    // ssd2805_dcs_write_cmd(0x2b, 4, y_start & 0xff, (y_start >> 8) & 0xFF, y_end & 0xff, (y_end >> 8) & 0xFF);
 }
 
 static void ssd2805_write_data(uint8_t *data, size_t len)
@@ -238,16 +212,7 @@ static void ssd2805_write_data(uint8_t *data, size_t len)
     if (len <= 0) {
         return;
     }
-    ssd2805_write_reg(0xB7,0x0210); //Generic Packet 
-    ssd2805_write_reg(0xBC, (len+1) & 0xFFFF);
-    ssd2805_write_reg(0xBD, (len+1) >> 16);
-    ssd2805_write_reg(0xbe, 0x0400);
-    ssd2805_write_cmd(0xbf); 
-    ssd2805_write_byte(0x2c);
-    ssd2805_set_level(ssd2805_obj->config.pin.dc, 1, ssd2805_obj->config.invert.dc);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 0, ssd2805_obj->config.invert.cs);
-    ssd2805_obj->write_cb(data, len);
-    ssd2805_set_level(ssd2805_obj->config.pin.cs, 1, ssd2805_obj->config.invert.cs);
+    ssd2805_dcs_write_data(data, len);
 }
 
 esp_err_t ssd2805_deinit(ssd2805_handle_t *handle)
@@ -296,13 +261,50 @@ esp_err_t ssd2805_init(ssd2805_handle_t *handle, ssd2805_config_t *config)
     ssd2805_set_level(ssd2805_obj->config.pin.cs, 0, ssd2805_obj->config.invert.cs);
     ssd2805_config(config);
     ssd2805_lcm_config(config);
-    // ssd2805_dcs_packet(540 * 960 * 2);
-    // if (ssd2805_obj->config.width == 8 && (ssd2805_obj->config.pin.rst == -1)) { // 当没有外部复位和位宽为8位时，需要配置两次寄存器
-    //     ssd2805_config(config);
-    //     ssd2805_lcm_config(config);
-    //     ssd2805_dcs_packet(800 * 480 * 2);
-    // }
+    if (ssd2805_obj->config.width == 8 && (ssd2805_obj->config.pin.rst == -1)) { // 当没有外部复位和位宽为8位时，需要配置两次寄存器
+        ssd2805_config(config);
+        ssd2805_lcm_config(config);
+    }
     ssd2805_set_level(ssd2805_obj->config.pin.bk, 0, ssd2805_obj->config.invert.bk);
+
+    typedef struct {
+        uint8_t data[24 / 8];
+    } rgb_data_t;
+
+    uint32_t data = 0;
+    
+    rgb_data_t tx_data[128];
+
+    for (int x = 0; x < 128; x++) {
+        data = 0xFFFF00;
+        memcpy(&tx_data[x], &data, sizeof(rgb_data_t));
+    }
+
+    printf("test\n");
+
+    // ssd2805_set_index(10, 10, 110 - 1, 110 - 1);
+    
+    while (1) {
+        // Memory write
+        for (int y = 0; y < 480; y++) {
+            for (int x = 0; x < 320; x+=1) {
+                ssd2805_dcs_write_data((uint8_t *)tx_data, 1 * sizeof(rgb_data_t));
+                // ssd2805_dcs_write_cmd(0x3C, 4, 0x1F, 0x00, 0x1F, 0x00);
+                // ssd2805_dcs_write_cmd(0x3C, 3, 0x00, 0x00, 0xFF);
+            }
+        }
+    }
+
+    // while (1) {
+    //     // Memory write
+    //     for (int y = 10; y < 110; y++) {
+    //         for (int x = 10; x < 110; x+=50) {
+    //             ssd2805_dcs_write_data((uint8_t *)tx_data, 50 * sizeof(rgb_data_t));
+    //             // ssd2805_dcs_write_cmd(0x3C, 4, 0x1F, 0x00, 0x1F, 0x00);
+    //             // ssd2805_gen_write_cmd(0x3C, 2, 0x00, 0x1F);
+    //         }
+    //     }
+    // }
     handle->set_index = ssd2805_set_index;
     handle->write_data = ssd2805_write_data;
     return ESP_OK;

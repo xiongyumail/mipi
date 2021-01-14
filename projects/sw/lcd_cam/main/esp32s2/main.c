@@ -80,8 +80,7 @@ static void lcd_cam_task(void *arg)
     extern const uint8_t pic[];
     for (int y = 0; y < LCD_HIGH; y++) {
         for (int x = 0; x < LCD_WIDTH * 2; x++) {
-            // img_buf[y * (LCD_WIDTH * 2) + x] = pic[y * (800 * 2) + x];
-            img_buf[y * (LCD_WIDTH * 2) + x] = 0xFF;
+            img_buf[y * (LCD_WIDTH * 2) + x] = pic[y * (800 * 2) + x];
         }  
     }
     ssd2805.set_index(0, 0, LCD_WIDTH - 1, LCD_HIGH - 1);
